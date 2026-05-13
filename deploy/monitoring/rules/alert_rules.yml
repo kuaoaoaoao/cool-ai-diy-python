@@ -1,0 +1,285 @@
+# ============================================================
+# Prometheus 告警规则
+# ============================================================
+#
+# 定义所有告警规则
+# 包含：服务可用性、资源使用、业务指标
+#
+# Author: CoolAI Team
+# Date: 2026-05-13
+# ============================================================
+
+groups:
+  # ============================================================
+  # 服务可用性告警
+  # ============================================================
+  - name: service_availability
+    rules:
+      # 服务完全不可用
+      - alert: ServiceDown
+        expr: up{job="coolai-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: 'infrastructure'
+        annotations:
+          summary: "后端服务不可用"
+          description: "后端服务 {{ $labels.instance }} 已停止运行超过1分钟"
+          runbook_url: "https://docs.coolai.com/runbooks/service-down"
+
+      # API响应错误率高
+      - alert: HighAPIErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: 'business'
+        annotations:
+          summary: "API错误率过高"
+          description: "API 5xx错误率超过5%，当前值: {{ $value | humanizePercentage }}"
+
+      # 健康检查失败
+      - alert: HealthCheckFailed
+        expr: health_check_status != 1
+        for: 2m
+        labels:
+          severity: warning
+          component: 'infrastructure'
+        annotations:
+          summary: "健康检查失败"
+          description: "服务健康检查连续失败超过2分钟"
+
+  # ============================================================
+  # 资源使用告警
+  # ============================================================
+  - name: resource_usage
+    rules:
+      # CPU使用率过高
+      - alert: HighCPUUsage
+        expr: cpu_usage_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+          component: 'infrastructure'
+        annotations:
+          summary: "CPU使用率过高"
+          description: "服务器 {{ $labels.instance }} CPU使用率超过85%，当前值: {{ $value | humanize }}%"
+          runbook_url: "https://docs.coolai.com/runbooks/high-cpu"
+
+      # CPU使用率严重过高
+      - alert: CriticalCPUUsage
+        expr: cpu_usage_percent > 95
+        for: 3m
+        labels:
+          severity: critical
+          component: 'infrastructure'
+        annotations:
+          summary: "CPU使用率严重过高"
+          description: "服务器 {{ $labels.instance }} CPU使用率超过95%，当前值: {{ $value | humanize }}%"
+
+      # 内存使用率过高
+      - alert: HighMemoryUsage
+        expr: memory_usage_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+          component: 'infrastructure'
+        annotations:
+          summary: "内存使用率过高"
+          description: "服务器 {{ $labels.instance }} 内存使用率超过85%，当前值: {{ $value | humanize }}%"
+
+      # 内存严重不足
+      - alert: CriticalMemoryUsage
+        expr: memory_usage_percent > 95
+        for: 3m
+        labels:
+          severity: critical
+          component: 'infrastructure'
+        annotations:
+          summary: "内存严重不足"
+          description: "服务器 {{ $labels.instance }} 内存使用率超过95%"
+
+      # 磁盘空间不足
+      - alert: LowDiskSpace
+        expr: disk_usage_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+          component: 'infrastructure'
+        annotations:
+          summary: "磁盘空间不足"
+          description: "服务器 {{ $labels.instance }} 磁盘使用率超过85%"
+
+      # 磁盘空间严重不足
+      - alert: CriticalDiskSpace
+        expr: disk_usage_percent > 95
+        for: 1m
+        labels:
+          severity: critical
+          component: 'infrastructure'
+        annotations:
+          summary: "磁盘空间严重不足"
+          description: "服务器 {{ $labels.instance }} 磁盘使用率超过95%，立即处理！"
+
+      # GPU使用率（如果使用GPU）
+      - alert: HighGPUUsage
+        expr: gpu_usage_percent > 90
+        for: 5m
+        labels:
+          severity: warning
+          component: 'infrastructure'
+        annotations:
+          summary: "GPU使用率过高"
+          description: "GPU使用率超过90%"
+
+  # ============================================================
+  # 性能指标告警
+  # ============================================================
+  - name: performance
+    rules:
+      # API响应时间过长
+      - alert: HighAPI Latency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 3
+        for: 5m
+        labels:
+          severity: warning
+          component: 'business'
+        annotations:
+          summary: "API响应时间过长"
+          description: "API P95响应时间超过3秒，当前值: {{ $value | humanizeDuration }}"
+
+      # 数据库连接池耗尽
+      - alert: DatabaseConnectionPoolExhausted
+        expr: postgres_db_pool_available / postgres_db_pool_size < 0.1
+        for: 5m
+        labels:
+          severity: critical
+          component: 'database'
+        annotations:
+          summary: "数据库连接池即将耗尽"
+          description: "PostgreSQL连接池可用率低于10%"
+
+      # Redis连接问题
+      - alert: RedisConnectionError
+        expr: redis_connected_clients == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: 'cache'
+        annotations:
+          summary: "Redis连接失败"
+          description: "无法连接到Redis服务"
+
+  # ============================================================
+  # 业务指标告警
+  # ============================================================
+  - name: business_metrics
+    rules:
+      # 对话请求失败率高
+      - alert: HighChatErrorRate
+        expr: rate(chat_requests_total{status="failed"}[5m]) / rate(chat_requests_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: 'business'
+        annotations:
+          summary: "对话请求失败率过高"
+          description: "AI对话请求失败率超过10%"
+
+      # RAG检索失败
+      - alert: RAGRetrievalFailed
+        expr: rate(rag_retrieval_errors_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: 'business'
+        annotations:
+          summary: "RAG检索错误过多"
+          description: "RAG检索错误率过高，请检查向量数据库状态"
+
+      # TTS合成失败
+      - alert: TTSFailure
+        expr: rate(tts_synthesis_errors_total[5m]) / rate(tts_synthesis_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: 'business'
+        annotations:
+          summary: "TTS合成失败率过高"
+          description: "语音合成失败率超过5%"
+
+      # 任务队列积压
+      - alert: TaskQueueBacklog
+        expr: rabbitmq_queue_messages > 1000
+        for: 10m
+        labels:
+          severity: warning
+          component: 'business'
+        annotations:
+          summary: "任务队列积压"
+          description: "任务队列消息数超过1000，当前值: {{ $value }}"
+
+  # ============================================================
+  # 数据库告警
+  # ============================================================
+  - name: database
+    rules:
+      # PostgreSQL连接数过多
+      - alert: PostgresTooManyConnections
+        expr: pg_stat_activity_count / pg_settings_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: 'database'
+        annotations:
+          summary: "PostgreSQL连接数过多"
+          description: "连接数使用超过80%"
+
+      # PostgreSQL慢查询
+      - alert: PostgresSlowQueries
+        expr: rate(pg_stat_statements_mean_exec_time[5m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: 'database'
+        annotations:
+          summary: "存在慢查询"
+          description: "平均查询时间超过1秒"
+
+  # ============================================================
+  # 网络和安全告警
+  # ============================================================
+  - name: network_security
+    rules:
+      # HTTP 401认证失败
+      - alert: HighAuthFailureRate
+        expr: rate(http_requests_total{status="401"}[5m]) / rate(http_requests_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: 'security'
+        annotations:
+          summary: "认证失败率过高"
+          description: "可能存在暴力破解行为"
+
+      # HTTP 403禁止访问
+      - alert: HighForbiddenRate
+        expr: rate(http_requests_total{status="403"}[5m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          component: 'security'
+        annotations:
+          summary: "禁止访问请求过多"
+          description: "可能存在权限配置问题或攻击行为"
+
+      # 带宽使用过高
+      - alert: HighBandwidthUsage
+        expr: rate(network_bytes_total[5m]) > 100000000
+        for: 10m
+        labels:
+          severity: warning
+          component: 'network'
+        annotations:
+          summary: "带宽使用过高"
+          description: "网络带宽使用超过100MB/s"

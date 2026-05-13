@@ -1,0 +1,109 @@
+# ============================================================
+# AlertManager 配置
+# ============================================================
+#
+# 告警管理配置
+# 负责接收、分类和处理告警
+#
+# 部署：docker-compose up -d alertmanager
+# 访问：http://localhost:9093
+#
+# Author: CoolAI Team
+# Date: 2026-05-13
+# ============================================================
+
+global:
+  # SMTP邮件配置（后期需要替换为真实配置）
+  smtp_smarthost: 'smtp.example.com:587'
+  smtp_from: 'alertmanager@coolai.com'
+  smtp_auth_username: 'alertmanager@coolai.com'
+  smtp_auth_password: 'your-smtp-password'  # 后期替换
+  
+  # 邮件模板
+  templates:
+    - '/etc/alertmanager/templates/*.tmpl'
+
+# 路由配置
+route:
+  # 默认接收者
+  receiver: 'default-receiver'
+  
+  # 分组配置
+  group_by: ['alertname', 'severity', 'cluster']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  
+  # 路由树
+  routes:
+    # 严重告警 - 立即通知
+    - match:
+        severity: critical
+      receiver: 'critical-receiver'
+      group_wait: 10s
+      repeat_interval: 1h
+    
+    # 警告级别
+    - match:
+        severity: warning
+      receiver: 'warning-receiver'
+      group_wait: 1m
+    
+    # 业务指标告警
+    - match:
+        component: 'business'
+      receiver: 'business-receiver'
+
+# 接收者配置
+receivers:
+  # 默认接收者 - 邮件
+  - name: 'default-receiver'
+    email_configs:
+      - to: 'admin@coolai.com'
+        send_resolved: true
+        headers:
+          subject: '[{{ .Status | toUpper }}] Prometheus 告警 - {{ .GroupLabels.alertname }}'
+
+  # 严重告警接收者 - 邮件 + 钉钉
+  - name: 'critical-receiver'
+    email_configs:
+      - to: 'admin@coolai.com'
+        send_resolved: true
+    webhook_configs:
+      # 钉钉机器人webhook（后期需要替换为真实URL）
+      - url: 'https://oapi.dingtalk.com/robot/send?access_token=YOUR_DINGTALK_TOKEN'
+        send_resolved: true
+    # 企业微信（后期可选配置）
+    # wechat_configs:
+    #   - corp_id: 'YOUR_CORP_ID'
+    #     agent_id: 'YOUR_AGENT_ID'
+    #     api_secret: 'YOUR_API_SECRET'
+    #     to_user: '@all'
+
+  # 警告级别接收者
+  - name: 'warning-receiver'
+    email_configs:
+      - to: 'dev-team@coolai.com'
+        send_resolved: true
+
+  # 业务告警接收者
+  - name: 'business-receiver'
+    email_configs:
+      - to: 'ops@coolai.com'
+        send_resolved: false
+
+# 抑制规则
+inhibit_rules:
+  # 严重告警抑制警告告警
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'cluster']
+
+  # 同一种告警抑制重复
+  - source_match:
+      alertname: 'InstanceDown'
+    target_match:
+      alertname: 'InstanceDown'
+    equal: ['instance']

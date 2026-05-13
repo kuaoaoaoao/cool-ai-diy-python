@@ -1,0 +1,326 @@
+# ============================================================
+# Docker Compose 配置 - CoolAI 智能业务平台
+# ============================================================
+#
+# 一站式部署配置，包含所有服务
+#
+# 启动命令：
+# docker-compose up -d
+#
+# 查看日志：
+# docker-compose logs -f backend
+#
+# 停止服务：
+# docker-compose down
+#
+# Author: CoolAI Team
+# Date: 2026-05-13
+# ============================================================
+
+version: '3.8'
+
+# ============================================================
+# 服务定义
+# ============================================================
+
+services:
+  # ============================================================
+  # Nginx 反向代理
+  # ============================================================
+  nginx:
+    image: nginx:alpine
+    container_name: coolai-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - coolai-network
+
+  # ============================================================
+  # 后端API服务
+  # ============================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: coolai-backend
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@postgres:5432/coolai
+      - REDIS_URL=redis://redis:6379/0
+      - MILVUS_HOST=milvus
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - APP_SECRET_KEY=${APP_SECRET_KEY:-coolai-secret-key-change-in-production}
+      - DEBUG=false
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - coolai-network
+
+  # ============================================================
+  # 前端Web服务
+  # ============================================================
+  frontend:
+    image: node:18-alpine
+    container_name: coolai-frontend
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - coolai-network
+
+  # ============================================================
+  # PostgreSQL 数据库
+  # ============================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: coolai-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=coolai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - coolai-network
+
+  # ============================================================
+  # Redis 缓存
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: coolai-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - coolai-network
+
+  # ============================================================
+  # Milvus 向量数据库
+  # ============================================================
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: coolai-milvus-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - milvus_etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - coolai-network
+
+  milvus-minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: coolai-milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - milvus_minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - coolai-network
+
+  milvus:
+    image: milvusdb/milvus:v2.3.4
+    container_name: coolai-milvus
+    restart: unless-stopped
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - milvus-etcd
+      - milvus-minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    networks:
+      - coolai-network
+
+  # ============================================================
+  # Prometheus 监控
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: coolai-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    networks:
+      - coolai-network
+
+  # ============================================================
+  # Prometheus Exporters
+  # ============================================================
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: coolai-postgres-exporter
+    restart: unless-stopped
+    environment:
+      - DATA_SOURCE_NAME=postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/coolai?sslmode=disable
+    ports:
+      - "9187:9187"
+    networks:
+      - coolai-network
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.55.0
+    container_name: coolai-redis-exporter
+    restart: unless-stopped
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+    ports:
+      - "9121:9121"
+    networks:
+      - coolai-network
+
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: coolai-node-exporter
+    restart: unless-stopped
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    ports:
+      - "9100:9100"
+    networks:
+      - coolai-network
+
+  # ============================================================
+  # Grafana 可视化
+  # ============================================================
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: coolai-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - coolai-network
+
+  # ============================================================
+  # Alertmanager 告警
+  # ============================================================
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    container_name: coolai-alertmanager
+    restart: unless-stopped
+    volumes:
+      - ./deploy/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    ports:
+      - "9093:9093"
+    networks:
+      - coolai-network
+
+# ============================================================
+# 数据卷定义
+# ============================================================
+
+volumes:
+  # PostgreSQL 数据卷
+  postgres_data:
+    driver: local
+
+  # Redis 数据卷
+  redis_data:
+    driver: local
+
+  # Milvus 数据卷
+  milvus_data:
+    driver: local
+  milvus_etcd_data:
+    driver: local
+  milvus_minio_data:
+    driver: local
+
+  # 监控数据卷
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  alertmanager_data:
+    driver: local
+
+# ============================================================
+# 网络定义
+# ============================================================
+
+networks:
+  coolai-network:
+    driver: bridge

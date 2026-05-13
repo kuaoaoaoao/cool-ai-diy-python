@@ -1,0 +1,61 @@
+# ============================================================
+# Prometheus 性能记录规则
+# ============================================================
+#
+# 定义预计算的性能指标
+# 用于Dashboard和告警
+#
+# Author: CoolAI Team
+# Date: 2026-05-13
+# ============================================================
+
+groups:
+  - name: http_metrics
+    rules:
+      # HTTP请求率
+      - record: http_requests:rate5m
+        expr: rate(http_requests_total[5m])
+
+      # HTTP错误率
+      - record: http_errors:rate5m
+        expr: rate(http_requests_total{status=~"5.."}[5m])
+
+      # HTTP P95延迟
+      - record: http_request_duration_seconds:p95
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
+
+      # HTTP P99延迟
+      - record: http_request_duration_seconds:p99
+        expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))
+
+  - name: business_metrics
+    rules:
+      # AI对话请求率
+      - record: chat_requests:rate5m
+        expr: rate(chat_requests_total[5m])
+
+      # TTS合成请求率
+      - record: tts_requests:rate5m
+        expr: rate(tts_synthesis_total[5m])
+
+      # RAG检索请求率
+      - record: rag_requests:rate5m
+        expr: rate(rag_retrieval_total[5m])
+
+      # Token消耗率
+      - record: tokens_consumed:rate5m
+        expr: rate(tokens_total[5m])
+
+  - name: infrastructure_metrics
+    rules:
+      # CPU平均使用率
+      - record: cpu_usage:avg5m
+        expr: avg_over_time(cpu_usage_percent[5m])
+
+      # 内存平均使用率
+      - record: memory_usage:avg5m
+        expr: avg_over_time(memory_usage_percent[5m])
+
+      # 可用磁盘空间
+      - record: disk_free_bytes
+        expr: disk_total_bytes - disk_used_bytes

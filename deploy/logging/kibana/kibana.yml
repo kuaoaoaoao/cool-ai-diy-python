@@ -1,0 +1,32 @@
+# ============================================================
+# Kibana 仪表盘导入配置 - CoolAI
+# ============================================================
+# 
+# 首次部署后，通过Kibana UI导入仪表盘
+# 访问: http://localhost:5601
+# 默认账号: elastic / changeme
+# 
+# 推荐创建的仪表盘:
+# 1. CoolAI 后端日志 - 按级别分类的日志统计
+# 2. API请求监控 - HTTP状态码分布、响应时间
+# 3. 错误追踪 - ERROR/CRITICAL日志聚合
+# 4. Nginx访问统计 - PV/UV、热门URL
+#
+# Author: CoolAI Team
+# Date: 2026-05-13
+# ============================================================
+
+# Kibana系统配置
+server.name: coolai-kibana
+server.host: "0.0.0.0"
+
+# 连接Elasticsearch
+elasticsearch.hosts: ["http://elasticsearch:9200"]
+elasticsearch.username: "elastic"
+elasticsearch.password: "changeme"
+
+# 中文语言
+i18n.locale: "zh-CN"
+
+# 自动导入仪表盘（如需使用）
+# xpack.savedObjects.import.directory: /usr/share/kibana/saved_objects

@@ -1,0 +1,65 @@
+# ============================================================
+# Filebeat 配置 - CoolAI 日志采集
+# ============================================================
+# 
+# 采集后端应用日志并发送到Logstash
+# 日志路径: /app/logs/*.log
+# 
+# Author: CoolAI Team
+# Date: 2026-05-13
+# ============================================================
+
+filebeat.inputs:
+  # 后端API日志
+  - type: log
+    enabled: true
+    paths:
+      - /app/logs/*.log
+    fields:
+      service: coolai-backend
+      env: production
+    fields_under_root: true
+    multiline:
+      pattern: '^\d{4}-\d{2}-\d{2}'
+      negate: true
+      match: after
+
+  # Nginx访问日志
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/nginx/access.log
+    fields:
+      service: coolai-nginx
+      log_type: access
+    fields_under_root: true
+
+  # Nginx错误日志
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/nginx/error.log
+    fields:
+      service: coolai-nginx
+      log_type: error
+    fields_under_root: true
+
+# 输出到Logstash
+output.logstash:
+  hosts: ["logstash:5044"]
+  index: coolai
+  # 压缩传输
+  compression_level: 3
+
+# 如果Logstash不可用，临时存储到文件
+queue.disk:
+  path: /usr/share/filebeat/data
+  max_size: 1GB
+
+# 日志级别
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: /usr/share/filebeat/logs
+  name: filebeat
+  keepfiles: 7

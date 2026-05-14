@@ -26,6 +26,7 @@ import DashboardPage from './pages/Dashboard';
 import ChatPage from './pages/Chat';
 import KnowledgePage from './pages/Knowledge';
 import TTTSPage from './pages/TTS';
+import VoiceClonePage from './pages/VoiceClone';
 import SettingsPage from './pages/Settings';
 
 /**
@@ -132,6 +133,9 @@ function App() {
         
         {/* TTS语音合成 */}
         <Route path="tts" element={<TTTSPage />} />
+        
+        {/* 声音克隆 */}
+        <Route path="voice-clone" element={<VoiceClonePage />} />
         
         {/* 设置 */}
         <Route path="settings" element={<SettingsPage />} />

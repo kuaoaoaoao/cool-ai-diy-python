@@ -82,6 +82,9 @@ class User(Base):
     # 账户激活状态
     is_active = Column(Boolean, default=True)
     
+    # 用户配置（存储API Key等敏感配置，JSON格式）
+    config = Column(JSON)
+    
     # 时间戳
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

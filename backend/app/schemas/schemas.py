@@ -230,6 +230,7 @@ class ChatRequest(BaseModel):
     system_prompt: Optional[str] = Field(None, description="系统提示词")
     temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0, description="温度参数")
     max_tokens: Optional[int] = Field(default=4096, ge=1, le=32000, description="最大Token数")
+    use_agent: bool = Field(default=False, description="是否使用Agent模式（Plan-Execute）")
     use_knowledge: bool = Field(default=False, description="是否使用知识库")
     knowledge_base_id: Optional[str] = Field(None, description="知识库ID")
     stream: bool = Field(default=True, description="是否流式输出")
@@ -317,6 +318,8 @@ class KnowledgeQueryRequest(BaseModel):
     similarity_threshold: Optional[float] = Field(
         default=0.5, ge=0.0, le=1.0, description="相似度阈值"
     )
+    generate_answer: bool = Field(default=False, description="是否使用RAG生成答案（而非仅检索）")
+    return_context: bool = Field(default=False, description="是否返回检索上下文")
 
 
 class KnowledgeQueryResult(BaseModel):
@@ -336,6 +339,8 @@ class KnowledgeQueryResponse(BaseModel):
     query: str = Field(..., description="原始查询")
     results: List[KnowledgeQueryResult] = Field(..., description="查询结果")
     total_count: int = Field(..., description="结果总数")
+    answer: Optional[str] = Field(None, description="RAG生成的答案（仅generate_answer=True时返回）")
+    model: Optional[str] = Field(None, description="生成答案使用的模型")
 
 
 # ============================================================

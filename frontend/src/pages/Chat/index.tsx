@@ -7,21 +7,23 @@
  * - 会话列表
  * - 聊天区域
  * - 模型选择
+ * - Agent模式开关
+ * - 知识库检索开关
  * 
  * Author: CoolAI Team
  * Date: 2026-05-13
  */
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Card, List, Input, Button, Select, Avatar, Spin, Typography, Space, Badge } from 'antd';
-import { SendOutlined, PlusOutlined, RobotOutlined, UserOutlined, ClearOutlined } from '@ant-design/icons';
+import { Card, List, Input, Button, Select, Avatar, Spin, Typography, Space, Badge, Switch, Tooltip } from 'antd';
+import { SendOutlined, PlusOutlined, RobotOutlined, UserOutlined, ClearOutlined, ThunderboltOutlined, BookOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../services/api';
 import type { Conversation, Message, ChatRequest, ModelInfo } from '../../types/auth';
 
 const { TextArea } = Input;
-const { Title } = Typography;
+const { Title, Text } = Typography;
 
 /**
  * 消息气泡组件
@@ -56,8 +58,22 @@ const MessageBubble = ({ message }: { message: Message }) => {
           borderRadius: isUser ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
           backgroundColor: isUser ? '#3B82F6' : '#f5f5f5',
           color: isUser ? '#fff' : '#333',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
         }}
       >
+        {/* Agent模式标记 */}
+        {!isUser && message.metadata?.use_agent && (
+          <div style={{ marginBottom: 4, fontSize: 11, opacity: 0.7 }}>
+            <ThunderboltOutlined /> Agent模式
+          </div>
+        )}
+        {/* 知识库增强标记 */}
+        {!isUser && message.metadata?.use_knowledge && (
+          <div style={{ marginBottom: 4, fontSize: 11, opacity: 0.7 }}>
+            <BookOutlined /> 知识库增强
+          </div>
+        )}
         {message.content}
       </div>
     </div>
@@ -76,6 +92,10 @@ const ChatPage: React.FC = () => {
   const [inputValue, setInputValue] = useState('');
   const [selectedModel, setSelectedModel] = useState('gpt-4-turbo-preview');
   const [currentConvId, setCurrentConvId] = useState<string | undefined>(conversationId);
+  const [useAgent, setUseAgent] = useState(false);  // Agent模式开关
+  const [useKnowledge, setUseKnowledge] = useState(false);  // 知识库增强开关
+  const [streamingMessage, setStreamingMessage] = useState('');  // 流式消息内容
+  const [isStreaming, setIsStreaming] = useState(false);  // 是否正在流式输出
   
   // 消息列表滚动引用
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -90,7 +110,7 @@ const ChatPage: React.FC = () => {
   const { data: messages, isLoading: msgLoading } = useQuery<Message[]>({
     queryKey: ['messages', currentConvId],
     queryFn: () => api.get(`/chat/${currentConvId}/messages`),
-    enabled: !!currentConvId,
+    enabled: !!currentConvId && !isStreaming,  // 流式输出时不刷新
   });
 
   // 获取模型列表
@@ -99,17 +119,16 @@ const ChatPage: React.FC = () => {
     queryFn: () => api.get('/system/models'),
   });
 
-  // 发送消息
+  // 发送消息（非流式）
   const sendMessageMutation = useMutation({
     mutationFn: (data: ChatRequest) => api.post('/chat/', data),
     onSuccess: (response) => {
-      // 如果是新建会话，刷新会话列表并跳转
       if (!currentConvId) {
         setCurrentConvId(response.conversation_id);
         navigate(`/chat/${response.conversation_id}`);
       }
-      // 刷新消息列表
       queryClient.invalidateQueries({ queryKey: ['messages'] });
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
       setInputValue('');
     },
   });
@@ -126,17 +145,101 @@ const ChatPage: React.FC = () => {
   // 自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, streamingMessage]);
 
-  // 处理发送消息
+  /**
+   * 使用SSE流式发送消息
+   */
+  const sendStreamMessage = useCallback(async () => {
+    if (!inputValue.trim() || isStreaming) return;
+    
+    const message = inputValue.trim();
+    setInputValue('');
+    setIsStreaming(true);
+    setStreamingMessage('');
+    
+    try {
+      const baseURL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
+      
+      // 获取Token
+      const authData = localStorage.getItem('coolai-auth');
+      let token = '';
+      if (authData) {
+        try {
+          const parsed = JSON.parse(authData);
+          token = parsed.state?.accessToken || '';
+        } catch { /* ignore */ }
+      }
+      
+      const response = await fetch(`${baseURL}/chat/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          conversation_id: currentConvId,
+          message,
+          model: selectedModel,
+          use_agent: useAgent,
+          use_knowledge: useKnowledge,
+          stream: true,
+        } as ChatRequest),
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let fullContent = '';
+      
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          const text = decoder.decode(value, { stream: true });
+          // 解析SSE数据
+          const lines = text.split('\n');
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.type === 'token') {
+                  fullContent += data.content;
+                  setStreamingMessage(fullContent);
+                } else if (data.type === 'error') {
+                  setStreamingMessage(prev => prev + `\n\n[错误] ${data.content}`);
+                } else if (data.type === 'done') {
+                  // 流结束
+                }
+              } catch { /* ignore parse errors */ }
+            }
+          }
+        }
+      }
+      
+      // 流式结束，刷新消息列表
+      if (!currentConvId && fullContent) {
+        // 新会话，需要从响应中获取ID（简化处理：刷新列表）
+        queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      }
+      queryClient.invalidateQueries({ queryKey: ['messages'] });
+      
+    } catch (error: any) {
+      setStreamingMessage(prev => prev + `\n\n[发送失败] ${error.message}`);
+    } finally {
+      setIsStreaming(false);
+      setStreamingMessage('');
+    }
+  }, [inputValue, currentConvId, selectedModel, useAgent, useKnowledge, isStreaming, queryClient, navigate]);
+
+  // 处理发送消息（使用流式）
   const handleSend = () => {
     if (!inputValue.trim()) return;
-    
-    sendMessageMutation.mutate({
-      conversation_id: currentConvId,
-      message: inputValue,
-      model: selectedModel,
-    });
+    sendStreamMessage();
   };
 
   // 处理回车发送
@@ -214,9 +317,11 @@ const ChatPage: React.FC = () => {
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 8,
           }}
         >
-          <Space>
+          <Space wrap>
             <span>模型：</span>
             <Select
               value={selectedModel}
@@ -228,6 +333,36 @@ const ChatPage: React.FC = () => {
                 disabled: !m.is_available,
               }))}
             />
+            
+            {/* Agent模式开关 */}
+            <Tooltip title="开启后使用Agent模式（Plan-Execute），AI会先规划再执行">
+              <Space size={4}>
+                <ThunderboltOutlined style={{ color: useAgent ? '#8B5CF6' : '#999' }} />
+                <Switch
+                  size="small"
+                  checked={useAgent}
+                  onChange={setUseAgent}
+                />
+                <Text style={{ fontSize: 12, color: useAgent ? '#8B5CF6' : '#999' }}>
+                  Agent
+                </Text>
+              </Space>
+            </Tooltip>
+            
+            {/* 知识库增强开关 */}
+            <Tooltip title="开启后会从知识库检索相关内容增强回答">
+              <Space size={4}>
+                <BookOutlined style={{ color: useKnowledge ? '#3B82F6' : '#999' }} />
+                <Switch
+                  size="small"
+                  checked={useKnowledge}
+                  onChange={setUseKnowledge}
+                />
+                <Text style={{ fontSize: 12, color: useKnowledge ? '#3B82F6' : '#999' }}>
+                  知识库
+                </Text>
+              </Space>
+            </Tooltip>
           </Space>
           
           <Button
@@ -240,16 +375,40 @@ const ChatPage: React.FC = () => {
 
         {/* 消息区域 */}
         <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
-          {currentConvId ? (
+          {currentConvId || isStreaming ? (
             <>
-              {msgLoading ? (
+              {msgLoading && !isStreaming ? (
                 <div style={{ textAlign: 'center', padding: 40 }}>
                   <Spin />
                 </div>
               ) : (
-                messages?.map((msg) => (
-                  <MessageBubble key={msg.id} message={msg} />
-                ))
+                <>
+                  {messages?.map((msg) => (
+                    <MessageBubble key={msg.id} message={msg} />
+                  ))}
+                  {/* 流式输出中的消息 */}
+                  {isStreaming && streamingMessage && (
+                    <MessageBubble 
+                      message={{
+                        id: 'streaming',
+                        conversation_id: currentConvId || '',
+                        role: 'assistant',
+                        content: streamingMessage,
+                        metadata: { use_agent: useAgent, use_knowledge: useKnowledge },
+                        created_at: new Date().toISOString(),
+                      }} 
+                    />
+                  )}
+                  {/* 流式加载指示器 */}
+                  {isStreaming && !streamingMessage && (
+                    <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 16 }}>
+                      <Avatar icon={<RobotOutlined />} style={{ backgroundColor: '#8B5CF6', marginRight: 12 }} />
+                      <div style={{ padding: '12px 16px', borderRadius: '16px 16px 16px 4px', backgroundColor: '#f5f5f5' }}>
+                        <Spin size="small" /> <Text type="secondary">思考中...</Text>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
               <div ref={messagesEndRef} />
             </>
@@ -258,6 +417,16 @@ const ChatPage: React.FC = () => {
               <RobotOutlined style={{ fontSize: 48, marginBottom: 16 }} />
               <Title level={4}>开始新对话</Title>
               <Text type="secondary">选择或创建一个会话开始聊天</Text>
+              <div style={{ marginTop: 16 }}>
+                <Space>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    <ThunderboltOutlined /> Agent模式：AI自动规划执行
+                  </Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    <BookOutlined /> 知识库：检索增强回答
+                  </Text>
+                </Space>
+              </div>
             </div>
           )}
         </div>
@@ -269,20 +438,31 @@ const ChatPage: React.FC = () => {
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleKeyPress}
-              placeholder="输入消息... (Shift+Enter 换行)"
+              placeholder={
+                useAgent 
+                  ? "Agent模式：描述你的需求，AI会制定计划并执行..." 
+                  : "输入消息... (Shift+Enter 换行)"
+              }
               autoSize={{ minRows: 1, maxRows: 4 }}
               style={{ flex: 1 }}
+              disabled={isStreaming}
             />
             <Button
               type="primary"
               icon={<SendOutlined />}
               onClick={handleSend}
-              loading={sendMessageMutation.isPending}
+              loading={isStreaming || sendMessageMutation.isPending}
               style={{ height: 'auto' }}
             >
               发送
             </Button>
           </Space.Compact>
+          {/* 当前模式提示 */}
+          <div style={{ marginTop: 4, fontSize: 11, color: '#999' }}>
+            {useAgent && <span><ThunderboltOutlined /> Agent模式已开启 · </span>}
+            {useKnowledge && <span><BookOutlined /> 知识库增强已开启 · </span>}
+            当前模型：{selectedModel}
+          </div>
         </div>
       </Card>
     </div>

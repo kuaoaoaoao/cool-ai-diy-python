@@ -3,19 +3,22 @@
 # ============================================================
 #
 # 本模块处理AI聊天相关的API接口
+# 已集成LLM Gateway和AgentService
 #
 # 主要功能：
 # 1. 创建对话会话
 # 2. 获取会话列表
-# 3. 发送聊天消息
-# 4. 流式对话响应
+# 3. 发送聊天消息（支持普通模式和Agent模式）
+# 4. 流式对话响应（SSE）
 # 5. 删除会话
+# 6. 获取消息历史
 #
 # Author: CoolAI Team
 # Date: 2026-05-13
 # ============================================================
 
 import json
+import asyncio
 from datetime import datetime
 from typing import Optional, List, AsyncGenerator
 
@@ -105,15 +108,6 @@ async def list_conversations(
 ):
     """
     获取用户的会话列表
-    
-    Args:
-        skip: 分页偏移
-        limit: 返回数量限制
-        current_user: 当前用户
-        db: 数据库会话
-        
-    Returns:
-        List[ConversationResponse]: 会话列表
     """
     # 查询会话列表
     stmt = (
@@ -122,7 +116,7 @@ async def list_conversations(
             Conversation.user_id == current_user["user_id"],
             Conversation.is_deleted == False
         )
-        .options(selectinload(Conversation.messages))  # 预加载消息
+        .options(selectinload(Conversation.messages))
         .order_by(desc(Conversation.updated_at))
         .offset(skip)
         .limit(limit)
@@ -163,14 +157,6 @@ async def get_conversation(
 ):
     """
     获取会话详情
-    
-    Args:
-        conversation_id: 会话ID
-        current_user: 当前用户
-        db: 数据库会话
-        
-    Returns:
-        ConversationResponse: 会话详情
     """
     stmt = (
         select(Conversation)
@@ -217,11 +203,6 @@ async def delete_conversation(
 ):
     """
     删除会话（软删除）
-    
-    Args:
-        conversation_id: 会话ID
-        current_user: 当前用户
-        db: 数据库会话
     """
     stmt = select(Conversation).where(
         Conversation.id == conversation_id,
@@ -243,38 +224,19 @@ async def delete_conversation(
 
 
 # ============================================================
-# 聊天消息
+# 辅助函数：获取或创建会话
 # ============================================================
 
-@router.post(
-    "/",
-    response_model=ChatResponse,
-    summary="发送消息",
-    description="向AI发送消息并获取回复（非流式）",
-)
-async def chat(
+async def _get_or_create_conversation(
     request: ChatRequest,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    处理用户聊天请求
-    
-    这是一个简化的实现，实际项目中应该调用AI服务
-    
-    Args:
-        request: 聊天请求数据
-        current_user: 当前用户
-        db: 数据库会话
-        
-    Returns:
-        ChatResponse: AI回复
-    """
-    # 获取或创建会话
+    user_id: str,
+    db: AsyncSession
+) -> Conversation:
+    """获取已有会话或创建新会话"""
     if request.conversation_id:
         stmt = select(Conversation).where(
             Conversation.id == request.conversation_id,
-            Conversation.user_id == current_user["user_id"]
+            Conversation.user_id == user_id
         )
         result = await db.execute(stmt)
         conversation = result.scalar_one_or_none()
@@ -287,12 +249,75 @@ async def chat(
     else:
         # 创建新会话
         conversation = Conversation(
-            user_id=current_user["user_id"],
+            user_id=user_id,
             model=request.model or "gpt-4-turbo-preview",
             system_prompt=request.system_prompt,
         )
         db.add(conversation)
-        await db.flush()  # 获取ID
+        await db.flush()
+    
+    return conversation
+
+
+async def _load_context_messages(
+    conversation_id: str,
+    db: AsyncSession,
+    limit: int = 20
+) -> list:
+    """从数据库加载历史消息作为上下文"""
+    from app.services.llm_gateway import Message as LLMMessage
+    
+    stmt = (
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(desc(Message.created_at))
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    messages = result.scalars().all()
+    
+    # 按时间正序排列
+    messages = list(reversed(messages))
+    
+    context = []
+    for msg in messages:
+        context.append(LLMMessage(role=msg.role, content=msg.content))
+    
+    return context
+
+
+# ============================================================
+# 聊天消息 - 普通模式
+# ============================================================
+
+@router.post(
+    "/",
+    response_model=ChatResponse,
+    summary="发送消息",
+    description="向AI发送消息并获取回复（非流式），支持Agent模式和普通模式",
+)
+async def chat(
+    request: ChatRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    处理用户聊天请求
+    
+    根据use_agent参数选择：
+    - use_agent=True: 使用AgentService（Plan-Execute模式）
+    - use_agent=False: 直接调用LLM Gateway
+    
+    Args:
+        request: 聊天请求数据
+        current_user: 当前用户
+        db: 数据库会话
+        
+    Returns:
+        ChatResponse: AI回复
+    """
+    # 获取或创建会话
+    conversation = await _get_or_create_conversation(request, current_user["user_id"], db)
     
     # 保存用户消息
     user_message = Message(
@@ -303,38 +328,117 @@ async def chat(
     db.add(user_message)
     await db.flush()
     
-    # TODO: 调用AI服务获取回复
-    # 这里使用模拟回复，实际项目中应该接入LangChain或其他AI服务
-    ai_response_content = f"【模拟回复】您发送了: {request.message}"
+    # 根据模式选择不同的AI服务
+    if request.use_agent:
+        # ========== Agent模式 ==========
+        from app.services.agent_service import get_agent_service
+        
+        agent_service = get_agent_service()
+        
+        # 加载历史上下文
+        context_messages = await _load_context_messages(conversation.id, db)
+        
+        # 调用Agent
+        agent_response = await agent_service.chat(
+            query=request.message,
+            conversation_id=str(conversation.id),
+            model_name=request.model,
+            use_knowledge=request.use_knowledge,
+            context_messages=context_messages,
+        )
+        
+        ai_response_content = agent_response.content
+        model_used = agent_response.model or request.model or "agent"
+        total_tokens = agent_response.total_tokens
+        
+    else:
+        # ========== 普通LLM模式 ==========
+        from app.services.llm_gateway import get_llm_gateway, Message as LLMMessage
+        
+        llm = get_llm_gateway()
+        model_name = request.model or "gpt-4-turbo-preview"
+        
+        # 构建消息列表
+        messages = []
+        if request.system_prompt:
+            messages.append(LLMMessage(role="system", content=request.system_prompt))
+        elif conversation.system_prompt:
+            messages.append(LLMMessage(role="system", content=conversation.system_prompt))
+        
+        # 加载历史上下文
+        context = await _load_context_messages(conversation.id, db)
+        messages.extend(context)
+        
+        # 添加当前用户消息
+        messages.append(LLMMessage(role="user", content=request.message))
+        
+        # 知识库检索增强
+        if request.use_knowledge and request.knowledge_base_id:
+            try:
+                from app.services.rag_service_impl import get_rag_pipeline
+                rag = get_rag_pipeline()
+                results = await rag.retrieve(request.message, top_k=5)
+                if results:
+                    context_text = "\n".join(
+                        f"[参考{i+1}] {r.chunk.content}" 
+                        for i, r in enumerate(results)
+                    )
+                    messages.append(LLMMessage(
+                        role="system",
+                        content=f"知识库检索结果：\n{context_text}"
+                    ))
+            except Exception:
+                pass  # 知识库检索失败不影响主流程
+        
+        # 调用LLM Gateway
+        llm_response = await llm.chat(
+            messages=messages,
+            model_name=model_name,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+        )
+        
+        ai_response_content = llm_response.content or ""
+        model_used = llm_response.model or model_name
+        total_tokens = llm_response.usage.get("total_tokens", 0)
     
     # 保存AI回复
     assistant_message = Message(
         conversation_id=conversation.id,
         role="assistant",
         content=ai_response_content,
-        metadata={"model": request.model or "gpt-4-turbo-preview"},
-        tokens=len(ai_response_content),  # 简化的token计算
+        metadata={
+            "model": model_used,
+            "use_agent": request.use_agent,
+            "use_knowledge": request.use_knowledge,
+        },
+        tokens=total_tokens,
     )
     db.add(assistant_message)
-    await db.commit()
     
     # 更新会话时间
     conversation.updated_at = datetime.now()
+    await db.commit()
+    await db.refresh(assistant_message)
     
     return ChatResponse(
         conversation_id=str(conversation.id),
         message_id=str(assistant_message.id),
         content=ai_response_content,
-        model=request.model or "gpt-4-turbo-preview",
-        usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        model=model_used,
+        usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": total_tokens},
         created_at=assistant_message.created_at,
     )
 
 
+# ============================================================
+# 聊天消息 - 流式模式
+# ============================================================
+
 @router.post(
     "/stream",
     summary="流式对话",
-    description="向AI发送消息并获取流式回复（SSE）",
+    description="向AI发送消息并获取流式回复（SSE），支持Agent模式和普通模式",
 )
 async def chat_stream(
     request: ChatRequest,
@@ -345,37 +449,10 @@ async def chat_stream(
     流式聊天响应
     
     使用Server-Sent Events (SSE) 实现流式输出
-    
-    Args:
-        request: 聊天请求数据
-        current_user: 当前用户
-        db: 数据库会话
-        
-    Returns:
-        StreamingResponse: SSE流
+    支持 use_agent 参数切换Agent模式
     """
-    # 获取或创建会话（与上面类似）
-    if request.conversation_id:
-        stmt = select(Conversation).where(
-            Conversation.id == request.conversation_id,
-            Conversation.user_id == current_user["user_id"]
-        )
-        result = await db.execute(stmt)
-        conversation = result.scalar_one_or_none()
-        
-        if not conversation:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="会话不存在"
-            )
-    else:
-        conversation = Conversation(
-            user_id=current_user["user_id"],
-            model=request.model or "gpt-4-turbo-preview",
-            system_prompt=request.system_prompt,
-        )
-        db.add(conversation)
-        await db.flush()
+    # 获取或创建会话
+    conversation = await _get_or_create_conversation(request, current_user["user_id"], db)
     
     # 保存用户消息
     user_message = Message(
@@ -387,30 +464,131 @@ async def chat_stream(
     await db.commit()
     
     async def generate_stream():
-        """
-        生成SSE流
+        """生成SSE流"""
+        full_content = ""  # 收集完整内容用于保存
+        total_tokens = 0
+        model_used = request.model or "gpt-4-turbo-preview"
         
-        每次发送一小段文本，模拟打字机效果
-        """
-        # TODO: 调用AI服务进行流式生成
-        response_text = f"【模拟流式回复】您发送了: {request.message}\n\n"
-        
-        # 模拟逐字输出
-        for i, char in enumerate(response_text):
-            # 发送SSE格式的数据
-            data = {
-                "type": "token",
-                "content": char,
-                "index": i,
-            }
-            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+        try:
+            if request.use_agent:
+                # ========== Agent流式模式 ==========
+                from app.services.agent_service import get_agent_service
+                from app.services.llm_gateway import Message as LLMMessage
+                
+                agent_service = get_agent_service()
+                context_messages = await _load_context_messages(conversation.id, db)
+                
+                # Agent流式输出
+                async for chunk in agent_service.chat_stream(
+                    query=request.message,
+                    conversation_id=str(conversation.id),
+                    model_name=request.model,
+                    use_knowledge=request.use_knowledge,
+                    context_messages=context_messages,
+                ):
+                    full_content += chunk
+                    data = {
+                        "type": "token",
+                        "content": chunk,
+                    }
+                    yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                
+                model_used = "agent"
+                
+            else:
+                # ========== 普通LLM流式模式 ==========
+                from app.services.llm_gateway import get_llm_gateway, Message as LLMMessage
+                
+                llm = get_llm_gateway()
+                model_name = request.model or "gpt-4-turbo-preview"
+                
+                # 构建消息列表
+                messages = []
+                if request.system_prompt:
+                    messages.append(LLMMessage(role="system", content=request.system_prompt))
+                elif conversation.system_prompt:
+                    messages.append(LLMMessage(role="system", content=conversation.system_prompt))
+                
+                # 加载历史上下文
+                context = await _load_context_messages(conversation.id, db)
+                messages.extend(context)
+                
+                # 添加当前用户消息
+                messages.append(LLMMessage(role="user", content=request.message))
+                
+                # 知识库检索增强
+                if request.use_knowledge and request.knowledge_base_id:
+                    try:
+                        from app.services.rag_service_impl import get_rag_pipeline
+                        rag = get_rag_pipeline()
+                        results = await rag.retrieve(request.message, top_k=5)
+                        if results:
+                            context_text = "\n".join(
+                                f"[参考{i+1}] {r.chunk.content}" 
+                                for i, r in enumerate(results)
+                            )
+                            messages.append(LLMMessage(
+                                role="system",
+                                content=f"知识库检索结果：\n{context_text}"
+                            ))
+                    except Exception:
+                        pass
+                
+                # 调用LLM Gateway流式接口
+                async for chunk in llm.chat_stream(
+                    messages=messages,
+                    model_name=model_name,
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens,
+                ):
+                    full_content += chunk
+                    data = {
+                        "type": "token",
+                        "content": chunk,
+                    }
+                    yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                
+                model_used = model_name
             
-            # 模拟延迟
-            import asyncio
-            await asyncio.sleep(0.05)
+        except Exception as e:
+            # 错误处理：发送错误事件
+            error_data = {
+                "type": "error",
+                "content": str(e),
+            }
+            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+        
+        # 保存AI回复到数据库（在流结束后）
+        try:
+            from app.core.database import async_session_maker
+            
+            async with async_session_maker() as save_db:
+                assistant_message = Message(
+                    conversation_id=conversation.id,
+                    role="assistant",
+                    content=full_content,
+                    metadata={
+                        "model": model_used,
+                        "use_agent": request.use_agent,
+                        "use_knowledge": request.use_knowledge,
+                    },
+                    tokens=len(full_content),
+                )
+                save_db.add(assistant_message)
+                
+                # 更新会话时间
+                conversation.updated_at = datetime.now()
+                await save_db.commit()
+        except Exception:
+            pass  # 保存失败不影响流式输出
         
         # 发送完成信号
-        yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+        done_data = {
+            "type": "done",
+            "usage": {"total_tokens": len(full_content)},
+            "model": model_used,
+        }
+        yield f"data: {json.dumps(done_data, ensure_ascii=False)}\n\n"
     
     return StreamingResponse(
         generate_stream(),
@@ -441,16 +619,6 @@ async def get_messages(
 ):
     """
     获取会话的消息历史
-    
-    Args:
-        conversation_id: 会话ID
-        skip: 分页偏移
-        limit: 返回数量
-        current_user: 当前用户
-        db: 数据库会话
-        
-    Returns:
-        List[MessageResponse]: 消息列表
     """
     # 验证会话所有权
     stmt = select(Conversation).where(

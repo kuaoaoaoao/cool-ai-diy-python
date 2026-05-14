@@ -43,6 +43,72 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ============================================================
+# JSON结构化日志配置（用于ELK采集）
+# ============================================================
+
+def _setup_json_logging():
+    """
+    配置JSON格式日志输出
+    
+    当启用JSON日志时，日志会以结构化JSON格式输出到文件
+    便于Filebeat采集和Elasticsearch检索
+    
+    JSON日志字段：
+    - timestamp: 时间戳
+    - level: 日志级别
+    - module: 模块名
+    - message: 日志消息
+    - extra: 额外信息（如请求ID、用户ID等）
+    """
+    try:
+        import json
+        from pathlib import Path
+        
+        # 创建日志目录
+        log_dir = Path("./logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # JSON格式化处理器
+        class JSONFormatter(logging.Formatter):
+            """JSON日志格式化器"""
+            def format(self, record: logging.LogRecord) -> str:
+                log_entry = {
+                    "timestamp": self.formatTime(record, self.datefmt),
+                    "level": record.levelname,
+                    "module": record.name,
+                    "message": record.getMessage(),
+                    "line": record.lineno,
+                    "func": record.funcName,
+                }
+                # 添加额外字段
+                if hasattr(record, "request_id"):
+                    log_entry["request_id"] = record.request_id
+                if hasattr(record, "user_id"):
+                    log_entry["user_id"] = record.user_id
+                if record.exc_info and record.exc_info[0] is not None:
+                    log_entry["exception"] = self.formatException(record.exc_info)
+                return json.dumps(log_entry, ensure_ascii=False)
+        
+        # 文件处理器
+        file_handler = logging.FileHandler(
+            log_dir / "coolai.json.log",
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(JSONFormatter(datefmt="%Y-%m-%d %H:%M:%S"))
+        file_handler.setLevel(logging.INFO)
+        
+        # 添加到根日志记录器
+        root_logger = logging.getLogger()
+        root_logger.addHandler(file_handler)
+        
+        logger.info("JSON结构化日志已启用，日志文件: ./logs/coolai.json.log")
+    except Exception as e:
+        logger.warning(f"JSON日志配置失败（不影响正常运行）: {e}")
+
+# 启用JSON日志
+_setup_json_logging()
+
 
 # ============================================================
 # 应用生命周期管理
@@ -77,6 +143,21 @@ async def lifespan(app: FastAPI):
         logger.info("数据库初始化完成")
     except Exception as e:
         logger.error(f"数据库初始化失败: {e}")
+    
+    # 初始化AI服务
+    try:
+        from app.services.llm_gateway import initialize_llm_gateway
+        from app.services.mcp_service import initialize_mcp_registry
+        from app.services.agent_service import initialize_agent_service
+        from app.services.voice_clone_service import initialize_voice_clone_service
+        
+        initialize_llm_gateway()
+        await initialize_mcp_registry()
+        initialize_agent_service()
+        initialize_voice_clone_service()
+        logger.info("AI服务初始化完成")
+    except Exception as e:
+        logger.error(f"AI服务初始化失败: {e}")
     
     # 其他启动任务可以在这里添加
     # 例如：初始化缓存、预加载模型等

@@ -99,6 +99,7 @@ export interface ChatRequest {
   system_prompt?: string;
   temperature?: number;
   max_tokens?: number;
+  use_agent?: boolean;
   use_knowledge?: boolean;
   knowledge_base_id?: string;
   stream?: boolean;
@@ -206,6 +207,86 @@ export interface TTSTask {
   error_message?: string;
   created_at: string;
   completed_at?: string;
+}
+
+
+// ============================================================
+// 声音克隆相关类型
+// ============================================================
+
+/** 声音模型状态 */
+export type VoiceModelStatus = 'pending' | 'training' | 'ready' | 'failed';
+
+/** 声音克隆引擎 */
+export type CloneEngine = 'xtts_v2' | 'so_vits_svc' | 'edge_simulate';
+
+/** 声音模型 */
+export interface VoiceModel {
+  id: string;
+  name: string;
+  description?: string;
+  model_path?: string;
+  reference_audio?: string;
+  status: VoiceModelStatus;
+  created_at: string;
+  updated_at?: string;
+}
+
+/** 克隆引擎信息 */
+export interface CloneEngineInfo {
+  name: CloneEngine;
+  display_name: string;
+  available: boolean;
+  description: string;
+  requires_gpu: boolean;
+}
+
+/** 克隆语音列表响应 */
+export interface VoiceModelsResponse {
+  models: VoiceModel[];
+  available_engine: CloneEngine;
+}
+
+/** 克隆引擎列表响应 */
+export interface CloneEnginesResponse {
+  current_engine: CloneEngine;
+  engines: CloneEngineInfo[];
+}
+
+/** 克隆合成请求 */
+export interface CloneSynthesizeRequest {
+  text: string;
+  model_id: string;
+  speed?: number;
+  format?: string;
+}
+
+/** 克隆合成响应 */
+export interface CloneSynthesizeResponse {
+  success: boolean;
+  output_path?: string;
+  size?: number;
+  engine?: string;
+  error?: string;
+}
+
+/** 训练结果 */
+export interface TrainResult {
+  task_id: string;
+  model_id: string;
+  status: string;
+  progress: number;
+  engine: CloneEngine;
+  message: string;
+}
+
+/** 上传参考音频响应 */
+export interface UploadRefResponse {
+  success: boolean;
+  reference_path?: string;
+  duration?: number;
+  size?: number;
+  error?: string;
 }
 
 

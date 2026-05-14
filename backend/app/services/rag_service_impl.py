@@ -880,33 +880,61 @@ class EmbeddingModel:
         """
         使用远程API编码（OpenAI等）
         
-        注意：此处需要真实的API Key
+        优先调用OpenAI Embedding API
+        无API Key时降级为本地模型或随机向量
         """
         if not self.api_key:
-            # 如果没有API Key，使用模拟向量
-            # 后期替换为真实的API调用
-            import random
-            return [[random.random() for _ in range(self.dimension)] for _ in texts]
+            # 无API Key时尝试使用本地模型
+            logger.warning("未配置Embedding API Key，尝试使用本地模型")
+            try:
+                return self._encode_local(texts)
+            except Exception as e:
+                logger.warning(f"本地模型也不可用，返回随机向量: {e}")
+                import random
+                return [[random.random() for _ in range(self.dimension)] for _ in texts]
         
-        # TODO: 实现OpenAI API调用
-        # async with httpx.AsyncClient() as client:
-        #     response = await client.post(
-        #         "https://api.openai.com/v1/embeddings",
-        #         headers={
-        #             "Authorization": f"Bearer {self.api_key}",
-        #             "Content-Type": "application/json"
-        #         },
-        #         json={
-        #             "input": texts,
-        #             "model": "text-embedding-ada-002"
-        #         }
-        #     )
-        #     result = response.json()
-        #     return [item["embedding"] for item in result["data"]]
+        try:
+            import httpx
+            
+            # 调用OpenAI Embedding API
+            base_url = getattr(settings, 'OPENAI_BASE_URL', 'https://api.openai.com/v1')
+            url = f"{base_url.rstrip('/')}/embeddings"
+            
+            # 同步HTTP调用（在异步上下文中由线程池执行）
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "input": texts,
+                        "model": "text-embedding-ada-002",
+                    },
+                )
+            
+            if response.status_code != 200:
+                logger.error(f"Embedding API调用失败: status={response.status_code}")
+                # 降级为本地模型
+                return self._encode_local(texts)
+            
+            result = response.json()
+            embeddings = [item["embedding"] for item in result["data"]]
+            
+            # 更新维度（如果API返回的维度与预设不同）
+            if embeddings and len(embeddings[0]) != self.dimension:
+                logger.info(f"Embedding维度更新: {self.dimension} -> {len(embeddings[0])}")
+                self.dimension = len(embeddings[0])
+            
+            return embeddings
         
-        # 临时返回模拟向量
-        import random
-        return [[random.random() for _ in range(self.dimension)] for _ in texts]
+        except ImportError:
+            logger.warning("httpx未安装，降级为本地Embedding模型")
+            return self._encode_local(texts)
+        except Exception as e:
+            logger.error(f"远程Embedding调用失败，降级为本地模型: {e}")
+            return self._encode_local(texts)
     
     def encode_single(self, text: str) -> List[float]:
         """
@@ -1815,20 +1843,56 @@ class RAGPipeline:
         prompt = self.build_prompt(query, retrieval_results, system_prompt)
         
         # TODO: 调用LLM生成答案
-        # 需要接入LangChain或直接调用LLM API
-        # answer = await self.llm_router.chat(prompt)
-        
-        # 临时返回
-        if use_knowledge and retrieval_results:
-            answer = f"[模拟回答] 基于{len(retrieval_results)}个参考资料回答您的问题。"
-        else:
-            answer = f"[模拟回答] {query}"
+        # 集成LLM Gateway进行答案生成
+        try:
+            from app.services.llm_gateway import get_llm_gateway, Message as LLMMessage
+            
+            llm = get_llm_gateway()
+            
+            # 构建LLM消息
+            llm_messages = []
+            if system_prompt:
+                llm_messages.append(LLMMessage(role="system", content=system_prompt))
+            
+            # 如果检索到上下文，添加到消息中
+            if use_knowledge and retrieval_results:
+                context_text = "\n\n".join(
+                    f"[参考资料{i+1}]\n{r.chunk.content}"
+                    for i, r in enumerate(retrieval_results)
+                )
+                llm_messages.append(LLMMessage(
+                    role="system",
+                    content=f"以下是从知识库中检索到的参考资料，请基于这些资料回答用户问题：\n\n{context_text}"
+                ))
+            
+            llm_messages.append(LLMMessage(role="user", content=query))
+            
+            # 调用LLM Gateway生成答案
+            llm_response = await llm.chat(
+                messages=llm_messages,
+                model_name=None,  # 使用默认模型
+                temperature=0.7,
+            )
+            
+            answer = llm_response.content or ""
+            model_used = llm_response.model or "unknown"
+            
+        except Exception as e:
+            # LLM调用失败时降级为模拟回复
+            import logging
+            logging.getLogger(__name__).warning(f"LLM调用失败，降级为模拟回复: {e}")
+            
+            if use_knowledge and retrieval_results:
+                answer = f"基于{len(retrieval_results)}个参考资料回答您的问题。（LLM服务暂时不可用）"
+            else:
+                answer = f"抱歉，LLM服务暂时不可用。"
+            model_used = "fallback"
         
         # 构建结果
         result = {
             "answer": answer,
-            "prompt": prompt,  # 供调试/使用其他LLM
-            "model": "mock",
+            "prompt": prompt,  # 供调试
+            "model": model_used,
             "use_knowledge": use_knowledge,
         }
         

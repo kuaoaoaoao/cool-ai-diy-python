@@ -7,6 +7,7 @@
  * - 知识库列表
  * - 文档上传
  * - 检索测试
+ * - RAG知识问答（新增）
  * 
  * Author: CoolAI Team
  * Date: 2026-05-13
@@ -14,16 +15,17 @@
 
 import { useState } from 'react';
 import {
-  Card, Table, Button, Space, Modal, Form, Input, Upload,
-  Tag, Typography, Popconfirm, message, Progress, Empty, Row, Col
+  Card, Table, Button, Space, Modal, Form, Input, Upload, Tabs,
+  Tag, Typography, Popconfirm, message, Progress, Empty, Row, Col, List
 } from 'antd';
 import {
   PlusOutlined, UploadOutlined, DeleteOutlined, SearchOutlined,
-  FileTextOutlined, DatabaseOutlined
+  FileTextOutlined, DatabaseOutlined, QuestionCircleOutlined,
+  RobotOutlined, BookOutlined
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../services/api';
-import type { KnowledgeBase, Document, UploadProps } from 'antd';
+import type { KnowledgeBase, Document, KnowledgeQueryResponse } from '../../types/auth';
 
 const { Title, Text, Paragraph } = Typography;
 const { Dragger } = Upload;
@@ -39,6 +41,12 @@ const KnowledgePage: React.FC = () => {
   const [selectedKB, setSelectedKB] = useState<KnowledgeBase | null>(null);
   const [searchText, setSearchText] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
+  
+  // RAG问答相关状态
+  const [qaQuestion, setQaQuestion] = useState('');
+  const [qaAnswer, setQaAnswer] = useState('');
+  const [qaReferences, setQaReferences] = useState<any[]>([]);
+  const [qaLoading, setQaLoading] = useState(false);
   
   // 创建知识库表单
   const [createForm] = Form.useForm();
@@ -107,6 +115,46 @@ const KnowledgePage: React.FC = () => {
       createKBMutation.mutate(values);
     } catch (error) {
       // 表单验证失败
+    }
+  };
+
+  /**
+   * RAG知识问答
+   * 调用后端 /knowledge/bases/{id}/query 接口，获取增强回答
+   */
+  const handleRAGQuery = async () => {
+    if (!qaQuestion.trim() || !selectedKB) return;
+    
+    setQaLoading(true);
+    setQaAnswer('');
+    setQaReferences([]);
+    
+    try {
+      const response = await api.post<KnowledgeQueryResponse & { answer?: string; model?: string }>(
+        `/knowledge/bases/${selectedKB.id}/query`,
+        { query: qaQuestion, generate_answer: true, return_context: true }
+      );
+      
+      // 如果后端返回了答案（RAG Pipeline已对接LLM）
+      if (response.answer) {
+        setQaAnswer(response.answer);
+      } else if (response.results && response.results.length > 0) {
+        // 降级：只有检索结果，拼接为简易答案
+        setQaAnswer(`基于${response.results.length}条检索结果：\n\n` +
+          response.results.map((r, i) => `[${i+1}] ${r.content}`).join('\n\n')
+        );
+      } else {
+        setQaAnswer('未找到相关内容，请尝试换个问题或上传更多文档。');
+      }
+      
+      // 保存参考来源
+      if (response.results) {
+        setQaReferences(response.results);
+      }
+    } catch (error: any) {
+      setQaAnswer('查询失败：' + (error?.response?.data?.detail || error.message));
+    } finally {
+      setQaLoading(false);
     }
   };
 
@@ -215,59 +263,160 @@ const KnowledgePage: React.FC = () => {
           </Card>
         </Col>
 
-        {/* 右侧：文档和检索 */}
+        {/* 右侧：文档、检索和问答 */}
         <Col span={16}>
           {selectedKB ? (
             <Space direction="vertical" style={{ width: '100%' }} size="large">
-              {/* 检索测试 */}
-              <Card title={<><SearchOutlined /> 检索测试</>}>
-                <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
-                  <Input.Search
-                    placeholder="输入问题进行检索..."
-                    enterButton={<Button type="primary" icon={<SearchOutlined />}>检索</Button>}
-                    onSearch={(value) => searchMutation.mutate({ query: value })}
-                    loading={searchMutation.isPending}
-                  />
-                </Space.Compact>
-                
-                {searchResults.length > 0 ? (
-                  <div>
-                    <Text type="secondary">找到 {searchResults.length} 条相关结果</Text>
-                    {searchResults.map((result, index) => (
-                      <Card key={index} size="small" style={{ marginTop: 8 }}>
-                        <Paragraph ellipsis={{ rows: 3 }}>{result.content}</Paragraph>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          相似度: {(result.score * 100).toFixed(1)}%
-                          {result.source && ` | 来源: ${result.source}`}
-                        </Text>
-                      </Card>
-                    ))}
-                  </div>
-                ) : (
-                  <Empty description="输入问题查看检索结果" />
-                )}
-              </Card>
-
-              {/* 文档管理 */}
-              <Card
-                title={<><FileTextOutlined /> 文档管理</>}
-                extra={
-                  <Upload
-                    showUploadList={false}
-                    beforeUpload={(file) => {
-                      uploadMutation.mutate({ file });
-                      return false;
-                    }}
-                  >
-                    <Button icon={<UploadOutlined />}>上传文档</Button>
-                  </Upload>
-                }
-              >
-                <Table
-                  dataSource={documents || []}
-                  rowKey="id"
-                  columns={documentColumns}
-                  pagination={{ pageSize: 10 }}
+              {/* Tab切换：检索测试 / 知识问答 / 文档管理 */}
+              <Card>
+                <Tabs
+                  defaultActiveKey="search"
+                  items={[
+                    {
+                      key: 'search',
+                      label: <span><SearchOutlined /> 检索测试</span>,
+                      children: (
+                        <>
+                          <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
+                            <Input.Search
+                              placeholder="输入问题进行检索..."
+                              enterButton={<Button type="primary" icon={<SearchOutlined />}>检索</Button>}
+                              onSearch={(value) => searchMutation.mutate({ query: value })}
+                              loading={searchMutation.isPending}
+                            />
+                          </Space.Compact>
+                          
+                          {searchResults.length > 0 ? (
+                            <div>
+                              <Text type="secondary">找到 {searchResults.length} 条相关结果</Text>
+                              {searchResults.map((result, index) => (
+                                <Card key={index} size="small" style={{ marginTop: 8 }}>
+                                  <Paragraph ellipsis={{ rows: 3 }}>{result.content}</Paragraph>
+                                  <Text type="secondary" style={{ fontSize: 12 }}>
+                                    相似度: {(result.score * 100).toFixed(1)}%
+                                    {result.source && ` | 来源: ${result.source}`}
+                                  </Text>
+                                </Card>
+                              ))}
+                            </div>
+                          ) : (
+                            <Empty description="输入问题查看检索结果" />
+                          )}
+                        </>
+                      ),
+                    },
+                    {
+                      key: 'qa',
+                      label: <span><QuestionCircleOutlined /> 知识问答</span>,
+                      children: (
+                        <div>
+                          <div style={{ marginBottom: 16, padding: 12, background: '#f6f8fa', borderRadius: 8 }}>
+                            <Space>
+                              <RobotOutlined style={{ color: '#8B5CF6', fontSize: 16 }} />
+                              <Text>基于「{selectedKB.name}」知识库的AI问答，输入问题获取智能回答</Text>
+                            </Space>
+                          </div>
+                          
+                          <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
+                            <Input
+                              placeholder="输入你的问题，AI将基于知识库内容回答..."
+                              value={qaQuestion}
+                              onChange={(e) => setQaQuestion(e.target.value)}
+                              onPressEnter={handleRAGQuery}
+                              size="large"
+                            />
+                            <Button
+                              type="primary"
+                              icon={<RobotOutlined />}
+                              onClick={handleRAGQuery}
+                              loading={qaLoading}
+                              size="large"
+                            >
+                              提问
+                            </Button>
+                          </Space.Compact>
+                          
+                          {/* AI回答区域 */}
+                          {qaAnswer && (
+                            <Card
+                              style={{ marginTop: 16 }}
+                              title={
+                                <Space>
+                                  <RobotOutlined style={{ color: '#8B5CF6' }} />
+                                  <span>AI回答</span>
+                                </Space>
+                              }
+                            >
+                              <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.8 }}>
+                                {qaAnswer}
+                              </div>
+                              
+                              {/* 参考来源 */}
+                              {qaReferences.length > 0 && (
+                                <div style={{ marginTop: 16, borderTop: '1px solid #f0f0f0', paddingTop: 12 }}>
+                                  <Text type="secondary" style={{ fontSize: 12 }}>
+                                    <BookOutlined /> 参考 {qaReferences.length} 条来源
+                                  </Text>
+                                  <List
+                                    size="small"
+                                    dataSource={qaReferences}
+                                    renderItem={(ref, idx) => (
+                                      <List.Item style={{ padding: '4px 0' }}>
+                                        <Paragraph
+                                          ellipsis={{ rows: 2 }}
+                                          style={{ margin: 0, fontSize: 12, color: '#666' }}
+                                        >
+                                          [{idx + 1}] {ref.content}
+                                          {ref.score && <Tag style={{ marginLeft: 4 }} color="blue">{(ref.score * 100).toFixed(0)}%</Tag>}
+                                        </Paragraph>
+                                      </List.Item>
+                                    )}
+                                  />
+                                </div>
+                              )}
+                            </Card>
+                          )}
+                          
+                          {!qaAnswer && !qaLoading && (
+                            <Empty
+                              description="输入问题开始知识问答"
+                              image={Empty.PRESENTED_IMAGE_SIMPLE}
+                            />
+                          )}
+                        </div>
+                      ),
+                    },
+                    {
+                      key: 'docs',
+                      label: <span><FileTextOutlined /> 文档管理</span>,
+                      children: (
+                        <>
+                          <div style={{ marginBottom: 16 }}>
+                            <Upload
+                              showUploadList={false}
+                              beforeUpload={(file) => {
+                                uploadMutation.mutate({ file });
+                                return false;
+                              }}
+                            >
+                              <Button icon={<UploadOutlined />} type="primary">
+                                上传文档
+                              </Button>
+                            </Upload>
+                            <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                              支持 PDF、Word、TXT、Markdown 格式
+                            </Text>
+                          </div>
+                          <Table
+                            dataSource={documents || []}
+                            rowKey="id"
+                            columns={documentColumns}
+                            pagination={{ pageSize: 10 }}
+                          />
+                        </>
+                      ),
+                    },
+                  ]}
                 />
               </Card>
             </Space>

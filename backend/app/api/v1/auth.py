@@ -19,6 +19,8 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from typing import Optional
+from pydantic import BaseModel as PydanticModel, Field
 
 from app.core.database import get_db
 from app.core.security import (
@@ -35,6 +37,7 @@ from app.schemas import (
     UserCreate,
     UserLogin,
     UserResponse,
+    UserUpdate,
     TokenResponse,
 )
 
@@ -296,3 +299,151 @@ async def get_me(
         )
     
     return user
+
+
+# ============================================================
+# 更新用户资料
+# ============================================================
+
+@router.put(
+    "/profile",
+    response_model=UserResponse,
+    summary="更新用户资料",
+    description="更新当前用户的个人信息（邮箱、姓名等）",
+)
+async def update_profile(
+    user_data: UserUpdate,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    更新用户资料
+    
+    Args:
+        user_data: 要更新的用户信息
+        current_user: 当前用户
+        db: 数据库会话
+        
+    Returns:
+        UserResponse: 更新后的用户信息
+    """
+    # 查找用户
+    stmt = select(User).where(User.id == current_user["user_id"])
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+    
+    # 检查邮箱唯一性
+    if user_data.email and user_data.email != user.email:
+        stmt = select(User).where(User.email == user_data.email)
+        result = await db.execute(stmt)
+        if result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="邮箱已被其他用户使用"
+            )
+    
+    # 更新字段
+    update_data = user_data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(user, field, value)
+    
+    await db.commit()
+    await db.refresh(user)
+    
+    return user
+
+
+# ============================================================
+# 更新API Key配置
+# ============================================================
+
+from pydantic import BaseModel as PydanticModel
+
+class APIKeysRequest(PydanticModel):
+    """API密钥更新请求"""
+    openai_api_key: Optional[str] = Field(None, description="OpenAI API Key")
+    anthropic_api_key: Optional[str] = Field(None, description="Anthropic API Key")
+
+
+class APIKeysResponse(PydanticModel):
+    """API密钥响应"""
+    openai_api_key_set: bool = Field(False, description="OpenAI API Key是否已设置")
+    anthropic_api_key_set: bool = Field(False, description="Anthropic API Key是否已设置")
+
+
+@router.put(
+    "/api-keys",
+    response_model=APIKeysResponse,
+    summary="更新API密钥",
+    description="更新当前用户的第三方API密钥配置",
+)
+async def update_api_keys(
+    key_data: APIKeysRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    更新用户的API密钥
+    
+    密钥存储在用户表的config字段中（加密存储）
+    """
+    stmt = select(User).where(User.id == current_user["user_id"])
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+    
+    # 将API密钥存储在用户的config字段中
+    config = user.config or {}
+    
+    if key_data.openai_api_key is not None:
+        config["openai_api_key"] = key_data.openai_api_key
+    if key_data.anthropic_api_key is not None:
+        config["anthropic_api_key"] = key_data.anthropic_api_key
+    
+    user.config = config
+    await db.commit()
+    
+    return APIKeysResponse(
+        openai_api_key_set=bool(config.get("openai_api_key")),
+        anthropic_api_key_set=bool(config.get("anthropic_api_key")),
+    )
+
+
+@router.get(
+    "/api-keys",
+    response_model=APIKeysResponse,
+    summary="获取API密钥状态",
+    description="获取当前用户API密钥的设置状态（不返回密钥本身）",
+)
+async def get_api_keys(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取API密钥设置状态"""
+    stmt = select(User).where(User.id == current_user["user_id"])
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+    
+    config = user.config or {}
+    
+    return APIKeysResponse(
+        openai_api_key_set=bool(config.get("openai_api_key")),
+        anthropic_api_key_set=bool(config.get("anthropic_api_key")),
+    )

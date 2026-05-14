@@ -7,7 +7,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import auth, chat, system, knowledge, tts
+from app.api.v1 import auth, chat, system, knowledge, tts, voice
 
 # 创建主API路由
 api_router = APIRouter()
@@ -17,6 +17,7 @@ api_router.include_router(auth.router)
 api_router.include_router(chat.router)
 api_router.include_router(knowledge.router)
 api_router.include_router(tts.router)
+api_router.include_router(voice.router)
 api_router.include_router(system.router)
 
 __all__ = ["api_router"]

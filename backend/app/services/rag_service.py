@@ -5,7 +5,7 @@
 导出RAG知识库服务的核心组件
 """
 
-from app.services.rag_service import (
+from app.services.rag_service_impl import (
     # 文档解析
     DocumentParser,
     DocumentParserFactory,

@@ -636,20 +636,81 @@ class CosyVoiceEngine(TTSEngineBase):
         try:
             self._ensure_loaded()
             
-            # TODO: 实现CosyVoice合成逻辑
-            # result = self._model.inference_sft(
-            #     text,
-            #     config.voice,
-            #     speed=config.speed
-            # )
-            # audio_data = result['audio']
+            # CosyVoice推理合成
+            # 使用线程池执行避免阻塞事件循环
+            loop = asyncio.get_event_loop()
             
-            # 临时返回模拟结果
+            def _do_synthesize():
+                """在线程池中执行CosyVoice推理"""
+                import numpy as np
+                
+                # 根据voice选择不同的推理模式
+                # sft: 预训练音色克隆
+                # cross_lingual: 跨语言合成
+                # instruct: 指令式合成
+                voice = config.voice or "default_female"
+                
+                # 获取推理结果流
+                result_stream = self._model.inference_sft(
+                    tts_text=text,
+                    spk_id=voice,
+                )
+                
+                # 收集所有音频chunk
+                audio_chunks = []
+                for result in result_stream:
+                    if 'tts_speech' in result:
+                        speech = result['tts_speech']
+                        # 转为numpy数组
+                        if hasattr(speech, 'numpy'):
+                            audio_chunks.append(speech.numpy())
+                        else:
+                            audio_chunks.append(np.array(speech))
+                
+                if not audio_chunks:
+                    return None
+                
+                # 拼接所有chunk
+                full_audio = np.concatenate(audio_chunks, axis=1) if len(audio_chunks) > 1 else audio_chunks[0]
+                
+                # 转换为WAV格式bytes
+                import soundfile as sf
+                import io
+                
+                buffer = io.BytesIO()
+                sf.write(buffer, full_audio.T, 22050, format='WAV')
+                audio_data = buffer.getvalue()
+                
+                return audio_data
+            
+            audio_data = await loop.run_in_executor(None, _do_synthesize)
+            
+            if audio_data is None:
+                return SynthesisResult(
+                    success=False,
+                    error="CosyVoice推理未产生音频输出"
+                )
+            
+            # 格式转换（如果需要）
+            if config.format != AudioFormat.WAV:
+                audio_data = await self._convert_format_sync(audio_data, config.format)
+            
+            # 计算时长（采样率22050）
+            duration = len(audio_data) / (22050 * 2)  # 16bit=2bytes per sample
+            
             return SynthesisResult(
-                success=False,
-                error="CosyVoice尚未配置，请先下载模型并配置model_path"
+                success=True,
+                audio_data=audio_data,
+                audio_base64=base64.b64encode(audio_data).decode('utf-8'),
+                duration=duration,
+                size=len(audio_data)
             )
         
+        except ImportError as e:
+            return SynthesisResult(
+                success=False,
+                error=f"CosyVoice依赖未安装: {e}"
+            )
         except Exception as e:
             return SynthesisResult(
                 success=False,
@@ -679,10 +740,45 @@ class CosyVoiceEngine(TTSEngineBase):
         config: TTSConfig
     ) -> AsyncIterator[bytes]:
         """流式合成"""
-        # CosyVoice可能需要特殊处理
-        audio_data = await self.synthesize(text, config)
-        if audio_data.success:
-            yield audio_data.audio_data
+        result = await self.synthesize(text, config)
+        if result.success and result.audio_data:
+            # CosyVoice流式输出：将完整音频分块返回
+            chunk_size = 4096
+            for i in range(0, len(result.audio_data), chunk_size):
+                yield result.audio_data[i:i + chunk_size]
+    
+    async def _convert_format_sync(self, audio_data: bytes, target_format: AudioFormat) -> bytes:
+        """
+        音频格式转换（同步执行）
+        
+        Args:
+            audio_data: WAV格式音频数据
+            target_format: 目标格式
+        
+        Returns:
+            bytes: 转换后的音频数据
+        """
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as wav_file:
+            wav_file.write(audio_data)
+            wav_path = wav_file.name
+        
+        try:
+            output_path = wav_path.replace('.wav', f'.{target_format.value}')
+            
+            process = await asyncio.create_subprocess_exec(
+                'ffmpeg', '-i', wav_path, '-y', output_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.communicate()
+            
+            with open(output_path, 'rb') as f:
+                result = f.read()
+            os.unlink(output_path)
+            return result
+        finally:
+            if os.path.exists(wav_path):
+                os.unlink(wav_path)
     
     def list_voices(self) -> List[VoiceInfo]:
         """

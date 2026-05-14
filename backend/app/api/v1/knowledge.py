@@ -558,6 +558,38 @@ async def query_knowledge(
     # 执行检索
     rag = get_rag()
     
+    # 如果请求生成答案（RAG问答模式），调用完整Pipeline
+    if request.generate_answer:
+        rag_result = await rag.query(
+            query=request.query,
+            use_knowledge=True,
+            doc_ids=[kb_id],
+            return_context=request.return_context,
+            top_k=request.top_k,
+        )
+        
+        # 构建检索结果列表
+        retrieval_results = rag_result.get("retrieval_results", [])
+        result_items = [
+            KnowledgeQueryResult(
+                content=r.get("content", ""),
+                score=r.get("score", 0.0),
+                source=r.get("source", ""),
+                metadata=r.get("metadata", {})
+            )
+            for r in retrieval_results
+        ]
+        
+        # 构建响应，包含AI生成的答案
+        return KnowledgeQueryResponse(
+            query=request.query,
+            results=result_items,
+            total_count=len(result_items),
+            answer=rag_result.get("answer", ""),
+            model=rag_result.get("model", ""),
+        )
+    
+    # 仅检索模式（原逻辑）
     results = await rag.retrieve(
         query=request.query,
         top_k=request.top_k,

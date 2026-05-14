@@ -20,6 +20,7 @@ import {
   MessageOutlined,
   BookOutlined,
   AudioOutlined,
+  SoundOutlined,
   SettingOutlined,
   BellOutlined,
   UserOutlined,
@@ -54,6 +55,11 @@ const menuItems = [
     key: '/tts',
     icon: <AudioOutlined />,
     label: '语音合成',
+  },
+  {
+    key: '/voice-clone',
+    icon: <SoundOutlined />,
+    label: '声音克隆',
   },
   {
     key: '/settings',

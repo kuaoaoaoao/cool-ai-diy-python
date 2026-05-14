@@ -30,6 +30,7 @@ const TTTSPage: React.FC = () => {
   const [form] = Form.useForm();
   const [selectedVoice, setSelectedVoice] = useState<string>('zh-CN-XiaoxiaoNeural');
   const [speed, setSpeed] = useState<number>(1.0);
+  const [pitch, setPitch] = useState<number>(0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
   // 获取可用语音列表
@@ -40,7 +41,7 @@ const TTTSPage: React.FC = () => {
 
   // 合成语音
   const synthesizeMutation = useMutation({
-    mutationFn: (data: { text: string; voice: string; speed: number; format: string }) =>
+    mutationFn: (data: { text: string; voice: string; speed: number; pitch: number; format: string }) =>
       api.post('/tts/synthesize', data, { responseType: 'blob' }),
     onSuccess: (response) => {
       // 创建音频URL
@@ -63,6 +64,7 @@ const TTTSPage: React.FC = () => {
         text: values.text,
         voice: selectedVoice,
         speed: speed,
+        pitch: pitch,
         format: 'mp3',
       });
     } catch (error) {
@@ -151,6 +153,26 @@ const TTTSPage: React.FC = () => {
                     <Text style={{ minWidth: 40 }}>{speed.toFixed(1)}x</Text>
                   </Space>
                 </div>
+
+                <div>
+                  <Space>
+                    <Text>音调：</Text>
+                    <Slider
+                      min={-50}
+                      max={50}
+                      step={1}
+                      value={pitch}
+                      onChange={setPitch}
+                      style={{ width: 200 }}
+                      marks={{
+                        '-50': '-50',
+                        0: '0',
+                        50: '+50',
+                      }}
+                    />
+                    <Text style={{ minWidth: 40 }}>{pitch > 0 ? `+${pitch}` : pitch}Hz</Text>
+                  </Space>
+                </div>
               </Space>
             </Card>
 
@@ -169,6 +191,8 @@ const TTTSPage: React.FC = () => {
                 icon={<ReloadOutlined />}
                 onClick={() => {
                   form.resetFields();
+                  setSpeed(1.0);
+                  setPitch(0);
                   setAudioUrl(null);
                 }}
               >
@@ -237,7 +261,7 @@ const TTTSPage: React.FC = () => {
             <ul style={{ paddingLeft: 20, margin: 0, color: '#666' }}>
               <li>支持中英文混合输入</li>
               <li>单次合成文本最多10000字</li>
-              <li>可调节语速（0.5x - 2x）</li>
+              <li>可调节语速（0.5x - 2x）和音调（-50 ~ +50Hz）</li>
               <li>支持下载为MP3格式</li>
             </ul>
           </Card>
